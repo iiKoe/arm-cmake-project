@@ -1,0 +1,222 @@
+#!/bin/bash
+
+ALL_COMPILERS=("gcc" "clang")
+DESTINATION=$PWD
+
+TEMPLATE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+TEMPLATE_DIR="$TEMPLATE_DIR/template-project"
+
+SETUP="setup.sh"
+PROJECT_NAME=""
+QUIET=0
+
+function help {
+    echo "ARM CMake project generator"
+    echo
+    echo "Usage: arm-create-project [options] project-name"
+    echo "Options:"
+    echo "  -c, --compiler <value>      Compiler for the project, options are: 'gcc', 'clang' or 'all' (default is 'gcc')"
+    echo "  -d, --destination <value>   Destination path of the project without project-name (default is current directory)"
+    echo "  -q, --quiet                 Quiet mode"
+    echo "  --gcc-bin <value>           Path of GCC bin directory"
+    echo "  --clang-bin <value>         Path of Clang/LLVM bin directory"
+    echo "  --libgcc <value>            Path of libgcc base (required by Clang, defaults to trying to find it)"
+    echo "  -h, --help                  Display this help and exit"
+    echo
+    echo "Exit status:"
+    echo "  0 if OK"
+    echo "  1 if error"
+}
+
+while (( "$#" )); do
+    case "$1" in
+        -h|--help)
+            help
+            exit 1
+            shift
+            ;;
+        -q|--quiet)
+            QUIET=1
+            shift
+            ;;
+        -c|--compiler)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                COMPILER+=("$2")
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        -d|--destination)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                DESTINATION=$2
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --gcc-bin)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                GCC_BIN=$2
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --clang-bin)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                CLANG_BIN=$2
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --libgcc)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                LIBGCC_BASE=$2
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        -*|--*=) # unsupported flags
+            echo "Error: Unsupported flag $1" >&2
+            exit 1
+            ;;
+        *) # preserve positional arguments
+            if [ -z ${PROJECT_NAME} ]; then
+                PROJECT_NAME="$1"
+            else
+                echo "Error: Please only provide one project name" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z $PROJECT_NAME ]; then
+    echo "Error: Please provide the project name as the last argument" >&2
+    exit 1
+fi
+
+if [ ! -d $DESTINATION ]; then
+    echo "Error: Project destination directory '$DESTINATION' does not exist" >&2
+    exit 1
+fi
+
+if [ ${#COMPILER[@]} -eq 0 ]; then
+    COMPILER+=("gcc") #default
+fi
+
+if [[ "${COMPILER[@]}" =~ "all" ]]; then
+    COMPILER=(${ALL_COMPILERS[@]})
+fi
+
+for c in ${COMPILER[@]}; do
+    if [ $c == "clang" ]; then
+        :
+    elif [ $c == "gcc" ]; then
+        :
+    else
+        echo "Error: Unknown compiler: $c" >&2
+        exit 1
+    fi
+done
+
+PROJECT_LOCATION=$DESTINATION/$PROJECT_NAME
+
+if [ $QUIET -eq 0 ]; then
+    echo "--PROJECT CONFIGURATION--"
+    echo "project name: $PROJECT_NAME"
+    echo "project location: $PROJECT_LOCATION"
+    echo "Compilers: ${COMPILER[@]}"
+    if [ ! -z $GCC_BIN ]; then
+        echo "gcc location: $GCC_BIN"
+    fi
+    if [ ! -z $CLANG_BIN ]; then
+        echo "clang location: $CLANG_BIN"
+    fi
+    if [ ! -z $LIBGCC_BASE ]; then
+        echo "libgcc base location: $LIBGCC_BASE"
+    fi
+fi
+
+# Create the template
+set -e
+
+mkdir $PROJECT_LOCATION
+cd $PROJECT_LOCATION
+
+
+# Copy the base dir in
+cp -r $TEMPLATE_DIR/* $PROJECT_LOCATION
+
+# Update the project name
+sed -i "s/projectname/$PROJECT_NAME/g" "$PROJECT_LOCATION/CMakeLists.txt"
+
+if [ ! -z $GCC_BIN ]; then
+    echo "export PATH=\"$GCC_BIN:\$PATH\"" >> "$SETUP"
+fi
+if [ ! -z $CLANG_BIN ]; then
+    echo "export PATH=\"$CLANG_BIN:\$PATH\"" >> "$SETUP"
+fi
+
+if [[ "${COMPILER[@]}" =~ "clang" ]]; then
+    if [ ! -z $LIBGCC_BASE ]; then
+        echo "export CMAKE_LIBGCC_BASE_DIR=\"$LIBGCC_BASE\"" >> "$SETUP"
+    else
+        echo "libgcc_loc=\$(arm-none-eabi-gcc -print-libgcc-file-name)" >> $SETUP
+        echo "libgcc_loc=\$(dirname \"\$libgcc_loc\")" >> $SETUP
+        echo "export CMAKE_LIBGCC_BASE_DIR=\"\$libgcc_loc\"" >> "$SETUP"
+    fi
+else
+    # Remove the clang files from the project
+    rm "cmake-clang.sh" "config-m4/toolchain-clang.cmake"
+fi
+
+if [[ "${COMPILER[@]}" =~ "gcc" ]]; then
+    :
+else
+    # Remove the gcc files from the project
+    rm "cmake-gcc.sh" "config-m4/toolchain-gcc.cmake"
+fi
+
+if [ -f "$SETUP" ]; then
+    if [ $QUIET -eq 0 ]; then
+        echo "source '$SETUP' to configure the toolchain"
+    fi
+    echo "" >> "$SETUP"
+    echo "# source this file to configure the toolchain" >> "$SETUP"
+fi
+
+# Build a simple Makefile to help with setting up cmake etc
+MAKEFILE="Makefile"
+
+echo "all: ${COMPILER[@]}" >> "$MAKEFILE"
+echo "" >> "$MAKEFILE"
+
+for c in ${COMPILER[@]}; do
+    build="build-$c"
+    echo "$c:" >> "$MAKEFILE"
+    echo -e "\tmkdir -p $build && cd $build && ../cmake-$c.sh ../ && make" >> "$MAKEFILE"
+    echo "" >> "$MAKEFILE"
+    clean+=("$build")
+done
+
+echo "clean: " >> "$MAKEFILE"
+echo -e "\trm -rf ${clean[@]}" >> "$MAKEFILE"
+echo "" >> "$MAKEFILE"
+
+echo ".PHONY: clean ${COMPILER[@]}" >> "$MAKEFILE"
+
+if [ $QUIET -eq 0 ]; then
+    echo "Successfully generated the project!"
+fi
+
+exit 0
